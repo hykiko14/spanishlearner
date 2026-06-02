@@ -98,17 +98,30 @@ async function fetchTranscript(videoId) {
   const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!tracks || !tracks.length) throw new Error('This video has no captions/transcript available.');
 
-  // prefer English (manual over auto-generated if both exist), else first
-  const english = tracks.filter(t => (t.languageCode || '').startsWith('en'));
-  let track = english.find(t => t.kind !== 'asr') || english[0] || tracks[0];
+  // prefer Spanish (manual over auto-generated if both exist), else first
+  const spanish = tracks.filter(t => (t.languageCode || '').startsWith('es'));
+  let track = spanish.find(t => t.kind !== 'asr') || spanish[0] || tracks[0];
 
   let baseUrl = track.baseUrl;
   if (!baseUrl) throw new Error('Caption track has no URL.');
-  if (!/[?&]fmt=/.test(baseUrl)) baseUrl += '&fmt=json3';
+  const urlJson3 = baseUrl.replace(/[?&]fmt=[^&]*/g, '') + '&fmt=json3';
+  const urlXml   = baseUrl.replace(/[?&]fmt=[^&]*/g, '');
 
-  const ttRes = await fetch(baseUrl, { headers: { 'User-Agent': ANDROID_UA } });
-  if (!ttRes.ok) throw new Error(`Transcript fetch returned ${ttRes.status}`);
-  const xml = await ttRes.text();
+  const ttHeaders = {
+    'User-Agent': ANDROID_UA,
+    'Accept-Language': 'es,en;q=0.9',
+    'Origin': 'https://www.youtube.com',
+    'Referer': 'https://www.youtube.com/',
+  };
+
+  let xml = '';
+  for (const ttUrl of [urlJson3, urlXml]) {
+    try {
+      const r = await fetch(ttUrl, { headers: ttHeaders, signal: AbortSignal.timeout(10000) });
+      if (r.ok) { xml = await r.text(); if (xml.trim()) break; }
+    } catch (e) { /* try next */ }
+  }
+  if (!xml.trim()) throw new Error('Transcript fetch failed — YouTube may be blocking this server.');
 
   let segments = parseTimedText(xml);
   if (!segments.length) segments = parseLegacyTimedText(xml);
@@ -120,7 +133,7 @@ async function fetchTranscript(videoId) {
 // ---------- translation ----------
 // Uses Google's free (unofficial) translate endpoint — no API key.
 // Default target: Traditional Chinese (zh-TW).
-async function translateText(text, target = 'zh-TW', source = 'es') {
+async function translateText(text, target = 'zh-TW', source = 'en') {
   const url = 'https://translate.googleapis.com/translate_a/single?client=gtx'
     + `&sl=${encodeURIComponent(source)}&tl=${encodeURIComponent(target)}`
     + `&dt=t&q=${encodeURIComponent(text)}`;
@@ -163,13 +176,12 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/translate') {
     const q = url.searchParams.get('q');
     const target = url.searchParams.get('target') || 'zh-TW';
-    const source = url.searchParams.get('source') || 'es';
     if (!q) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ error: 'Missing text (?q=).' }));
     }
     try {
-      const translated = await translateText(q, target, source);
+      const translated = await translateText(q, target);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ translated, target }));
     } catch (e) {
