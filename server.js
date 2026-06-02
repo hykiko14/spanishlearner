@@ -31,28 +31,51 @@ function decodeEntities(s) {
 const ANDROID_UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip';
 
 async function getPlayerData(videoId) {
-  const res = await fetch('https://www.youtube.com/youtubei/v1/player', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': ANDROID_UA,
-      'X-Goog-Api-Format-Version': '2',
-    },
-    body: JSON.stringify({
-      videoId,
-      context: {
-        client: {
-          clientName: 'ANDROID',
-          clientVersion: '20.10.38',
-          androidSdkVersion: 34,
-          hl: 'en',
-          gl: 'US',
-        },
+  // Try multiple clients — some get blocked on cloud IPs
+  const clients = [
+    {
+      name: 'TVHTML5',
+      ua: 'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/6.0 TV Safari/538.1',
+      body: {
+        videoId,
+        context: { client: { clientName: 'TVHTML5', clientVersion: '7.20230405.08.01', hl: 'en', gl: 'US' } },
       },
-    }),
-  });
-  if (!res.ok) throw new Error(`YouTube player API returned ${res.status}`);
-  return res.json();
+    },
+    {
+      name: 'ANDROID',
+      ua: ANDROID_UA,
+      body: {
+        videoId,
+        context: { client: { clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 34, hl: 'en', gl: 'US' } },
+      },
+    },
+    {
+      name: 'WEB',
+      ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      body: {
+        videoId,
+        context: { client: { clientName: 'WEB', clientVersion: '2.20240415.01.00', hl: 'en', gl: 'US' } },
+      },
+    },
+  ];
+
+  let lastErr;
+  for (const client of clients) {
+    try {
+      const res = await fetch('https://www.youtube.com/youtubei/v1/player', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': client.ua, 'X-Goog-Api-Format-Version': '2' },
+        body: JSON.stringify(client.body),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) { lastErr = new Error(`YouTube player API returned ${res.status} (${client.name})`); continue; }
+      const data = await res.json();
+      const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (tracks && tracks.length) return data; // only accept if captions present
+      lastErr = new Error(`No captions from client ${client.name}`);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('All YouTube clients failed.');
 }
 
 // timedtext format=3: <p t="ms" d="ms"><s>word</s>...</p> (or plain text inside <p>)
